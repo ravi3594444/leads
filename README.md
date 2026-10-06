@@ -25,7 +25,7 @@ Set values in Vercel's environment settings, not in GitHub source or public brow
 | `WORKSPACE_PASSWORD` | Required for first login: privately configured initial password. |
 | `WORKSPACE_ID` | Optional stable workspace identifier; default `permitline-owner`. Use a different ID for an isolated preview workspace. |
 | `WORKSPACE_NAME` | Optional name shown in the account menu. |
-| `DATABASE_CA_CERT` | Optional PEM certificate if a custom database CA is required. TLS certificate checking remains enabled. |
+| `DATABASE_CA_CERT` | Optional PEM override for a custom database CA. Supabase hosts automatically use the bundled public Supabase CA; certificate and hostname verification remain enabled. |
 | `PERMIT_API_URL` | Optional HTTPS collector origin, without a trailing `/api`; empty uses demo data. |
 | `PERMIT_API_TOKEN` | Collector bearer token, required when its API requires authentication. |
 | `AIMLAPI_KEY` | Optional AI/ML API server key for Jev assessments. |

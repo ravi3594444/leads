@@ -14,7 +14,7 @@ process.env.DATABASE_URL = 'postgres://test-only@localhost/test-only';
 process.env.WORKSPACE_ID = 'test-owner';
 process.env.WORKSPACE_PASSWORD = password;
 delete process.env.PERMIT_API_URL;
-delete process.env.TYPESAFE_API_KEY;
+delete process.env.AIMLAPI_KEY;
 let postgres, database, handler, cookie;
 
 before(async () => {
@@ -76,6 +76,80 @@ test('partial sales-state updates preserve notes in Postgres and CSV', async () 
 test('preferences persist and unconfigured Jev returns an explicit error', async () => {
   assert.equal((await request('/api/profile', { method: 'POST', body: { company: 'Test business', trades: ['HVAC'], counties: ['Orange'], commercialOnly: true, minimumValue: 0, jevEnabled: false } })).status, 200);
   const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-001'] } }); assert.equal(response.status, 409);
+});
+test('Jev uses AI/ML API with typed questions and reuses a cached assessment', async context => {
+  process.env.AIMLAPI_KEY = 'test-only-aiml-key';
+  let calls = 0;
+  context.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls++;
+    assert.equal(url, 'https://api.aimlapi.com/v1/decisions');
+    assert.equal(options.headers.Authorization, 'Bearer test-only-aiml-key');
+    const input = JSON.parse(options.body);
+    assert.equal(input.model, 'typesafe/jev');
+    const state = JSON.parse(input.state);
+    assert.deepEqual(state.profile.trades, ['HVAC']);
+    assert.equal(input.questions.service_fit.type, 'score');
+    assert.equal(input.questions.service_fit.criteria.length, 5);
+    assert.equal(input.questions.scope_clarity.criteria.length, 3);
+    assert.equal(input.questions.trade.type, 'choice');
+    assert.ok(input.questions.trade.criteria.HVAC);
+    return Response.json({ model: 'typesafe/jev-1.13-20260917', answers: {
+      service_fit: { type: 'score', score: 3.5, confidence: 0.91 },
+      scope_clarity: { type: 'score', score: 1.25, confidence: 0.8 },
+      trade: { type: 'choice', choice: 'HVAC', confidence: 0.97 },
+    }, usage: { input_tokens: 100, output_tokens: 0 } });
+  });
+  try {
+    const profile = (await (await request('/api/workspace')).json()).profile;
+    assert.equal((await request('/api/profile', { method: 'POST', body: { ...profile, jevEnabled: true } })).status, 200);
+    const workspace = await (await request('/api/workspace')).json();
+    assert.equal(workspace.jevConnected, true);
+    assert.ok(!JSON.stringify(workspace).includes(process.env.AIMLAPI_KEY));
+    // A cached decision from the previous provider must not suppress the AI/ML call.
+    const { assessmentInput } = await import('../server/data.ts');
+    const { sha256 } = await import('../lib/password.ts');
+    const permit = (await (await request('/api/permits/demo-001')).json()).permit;
+    const oldState = JSON.parse(assessmentInput(permit, workspace.profile));
+    delete oldState.assessmentVersion;
+    await postgres.query('INSERT INTO permitline_dashboard.jev_assessments (user_id, permit_id, input_hash, payload, created_at) VALUES ($1,$2,$3,$4,$5)', ['test-owner', 'demo-001', await sha256(JSON.stringify(oldState)), JSON.stringify({ score: 1, model: 'previous-provider' }), Date.now()]);
+    assert.equal((await request('/api/jev/assess', { method: 'POST', session: null, body: { ids: ['demo-001'] } })).status, 401);
+    const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-001'] } });
+    assert.equal(response.status, 200);
+    const result = (await response.json()).assessments['demo-001'];
+    assert.equal(result.model, 'typesafe/jev-1.13-20260917');
+    assert.equal(result.confidence, 0.91);
+    assert.equal(result.trade, 'HVAC');
+    assert.ok(Number.isInteger(result.score) && result.score > 70 && result.score <= 100);
+    const repeat = await (await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-001', 'demo-001'] } })).json();
+    assert.deepEqual(repeat.assessments['demo-001'], result);
+    assert.equal(calls, 1);
+    const detail = (await (await request('/api/permits/demo-001')).json()).permit;
+    assert.equal(detail.priority, result.score);
+    assert.equal(detail.assessment.model, result.model);
+    assert.equal((await request('/api/profile', { method: 'POST', body: profile })).status, 200);
+  } finally { delete process.env.AIMLAPI_KEY; }
+});
+test('AI/ML provider errors do not create a cached decision', async context => {
+  process.env.AIMLAPI_KEY = 'test-only-aiml-key';
+  context.mock.method(globalThis, 'fetch', async () => new Response('Provider refused the request', { status: 401 }));
+  try {
+    const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-002'] } });
+    assert.equal(response.status, 502);
+    assert.match((await response.json()).error, /Jev/);
+    const rows = await postgres.query("SELECT permit_id FROM permitline_dashboard.jev_assessments WHERE permit_id='demo-002'");
+    assert.equal(rows.rows.length, 0);
+  } finally { delete process.env.AIMLAPI_KEY; }
+});
+test('out-of-range AI/ML scores are refused instead of saved', async context => {
+  process.env.AIMLAPI_KEY = 'test-only-aiml-key';
+  context.mock.method(globalThis, 'fetch', async () => Response.json({ model: 'typesafe/jev', answers: {
+    service_fit: { score: 5, confidence: 0.9 }, scope_clarity: { score: 1 }, trade: { choice: 'HVAC' },
+  } }));
+  try {
+    assert.equal((await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-003'] } })).status, 502);
+    const rows = await postgres.query("SELECT permit_id FROM permitline_dashboard.jev_assessments WHERE permit_id='demo-003'");
+    assert.equal(rows.rows.length, 0);
+  } finally { delete process.env.AIMLAPI_KEY; }
 });
 test('sessions and notes survive a database restart', async () => {
   await postgres.close(); postgres = new PGlite(directory); database = drizzle(postgres, { schema });

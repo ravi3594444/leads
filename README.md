@@ -28,7 +28,7 @@ Set values in Vercel's environment settings, not in GitHub source or public brow
 | `DATABASE_CA_CERT` | Optional PEM certificate if a custom database CA is required. TLS certificate checking remains enabled. |
 | `PERMIT_API_URL` | Optional HTTPS collector origin, without a trailing `/api`; empty uses demo data. |
 | `PERMIT_API_TOKEN` | Collector bearer token, required when its API requires authentication. |
-| `TYPESAFE_API_KEY` | Optional TypeSafe/Jev server key. |
+| `AIMLAPI_KEY` | Optional AI/ML API server key for Jev assessments. |
 
 Passwords use salted PBKDF2-SHA256. Sessions use random tokens, store token hashes in Postgres, expire after 12 hours and use HttpOnly/SameSite cookies. HTTPS cookies are Secure. The server checks the password session on every protected route. Five incorrect login attempts trigger a persisted five-minute lock. Password changes revoke previous sessions. The private database schema has RLS enabled, client grants revoked and no public client policies. The database connection must use its owner role.
 
@@ -80,11 +80,11 @@ The dashboard owns private saved/contacted/won/dismissed states and notes in its
 
 ## Jev
 
-Optional assessments call `POST https://api.typesafe.ai/v1/systemone` with `jev-latest` and typed questions for service fit, scope clarity and trade. Responses are validated and cached per permit/profile. Enable Jev in Settings after configuring its server key; then choose Assess with Jev in a permit drawer. Collection keeps working without Jev. Priority and model confidence are not probabilities of winning a sale.
+Optional assessments call `POST https://api.aimlapi.com/v1/decisions` with `typesafe/jev` and typed questions for service fit, scope clarity and trade. Responses are validated and cached per provider, model, permit and profile. Set `AIMLAPI_KEY` privately in Vercel and redeploy. Enable Jev in Settings, then choose Assess with Jev in a permit drawer. Collection keeps working without Jev. Priority and model confidence are not probabilities of winning a sale.
 
 ## References
 
 - Next.js/Vercel: https://vercel.com/docs/frameworks/full-stack/nextjs
 - GitHub deployments: https://vercel.com/docs/git/vercel-for-github
 - Supabase database connections: https://supabase.com/docs/guides/database/connecting-to-postgres
-- TypeSafe/Jev: https://docs.typesafe.ai/introduction/quickstart
+- AI/ML API Jev: https://docs.aimlapi.com/api-references/decision-models/typesafe/jev

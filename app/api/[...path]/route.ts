@@ -46,11 +46,11 @@ async function serve(request: Request): Promise<Response> {
 
     const user = await unlockedUser(request), userId = user.userId, db = getDb();
     if (path === "workspace" && request.method === "GET") {
-      return json({ profile: await profileFor(userId), leads: await leadsFor(userId), jevConnected: !!env.TYPESAFE_API_KEY, backendConnected: !!env.PERMIT_API_URL, displayName: user.fullName || "Your workspace" });
+      return json({ profile: await profileFor(userId), leads: await leadsFor(userId), jevConnected: !!env.AIMLAPI_KEY, backendConnected: !!env.PERMIT_API_URL, displayName: user.fullName || "Your workspace" });
     }
     if (path === "profile" && request.method === "POST") {
       const profile = profileSchema.parse(await body(request));
-      if (profile.jevEnabled && !env.TYPESAFE_API_KEY) throw new ApiError(409, "Jev isn't connected yet. Your service profile can still be saved.");
+      if (profile.jevEnabled && !env.AIMLAPI_KEY) throw new ApiError(409, "Jev isn't connected yet. Your service profile can still be saved.");
       await db.insert(preferences).values({ userId, payload: JSON.stringify(profile), updatedAt: Date.now() }).onConflictDoUpdate({ target: preferences.userId, set: { payload: JSON.stringify(profile), updatedAt: Date.now() } });
       await db.delete(assessments).where(eq(assessments.userId, userId));
       return json({ profile });
@@ -91,16 +91,16 @@ async function serve(request: Request): Promise<Response> {
       return new Response(makeCsv(page.permits, await leadsFor(userId)), { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="permitline-demo-permits.csv"', "Cache-Control": "no-store" } });
     }
     if (path === "jev/assess" && request.method === "POST") {
-      if (!env.TYPESAFE_API_KEY) throw new ApiError(409, "Jev isn't connected yet. Use the priority preview while we connect your API key.");
+      if (!env.AIMLAPI_KEY) throw new ApiError(409, "Jev isn't connected yet. Use the priority preview while we connect your API key.");
       const { ids } = z.object({ ids: z.array(z.string().min(1).max(200)).min(1).max(10) }).parse(await body(request));
       const profile = await profileFor(userId), results: Record<string, Assessment> = {};
       for (const id of Array.from(new Set(ids))) {
         const permit = await permitById(userId, id), input = assessmentInput(permit, profile), inputHash = await sha256(input);
         const [cached] = await db.select().from(assessments).where(and(eq(assessments.userId, userId), eq(assessments.permitId, id))).limit(1);
         if (cached?.inputHash === inputHash) { results[id] = JSON.parse(cached.payload); continue; }
-        const response = await fetch("https://api.typesafe.ai/v1/systemone", {
-          method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.TYPESAFE_API_KEY}` }, signal: AbortSignal.timeout(15000),
-          body: JSON.stringify({ model: "jev-latest", state: input, questions: {
+        const response = await fetch("https://api.aimlapi.com/v1/decisions", {
+          method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.AIMLAPI_KEY}` }, signal: AbortSignal.timeout(15000),
+          body: JSON.stringify({ model: "typesafe/jev", state: input, questions: {
             service_fit: { type: "score", instructions: "Evaluate the permit work's relevance to the profile's selected services. If no services are selected, evaluate relevance to general contracting. Evaluate service fit only, not the probability of winning a sale.", criteria: ["No relevant work", "Little relevant work", "Some relevant work", "Clearly relevant work", "Direct match to the selected services"] },
             scope_clarity: { type: "score", instructions: "How clearly does this description identify the work involved?", criteria: ["Insufficient scope information", "Partly specified work", "Clearly specified work"] },
             trade: { type: "choice", instructions: "Which trade primarily matches this permit's scope?", criteria: { "General contracting": "Building, additions or work spanning several trades", Roofing: "Roof replacement, repair or installation", HVAC: "Air conditioning, heating or ventilation", Electrical: "Electrical service, wiring or lighting", Plumbing: "Pipes, fixtures or drainage", Remodeling: "Interior alterations and finishes", Pools: "Pool construction or refurbishment", "Site work": "Grading, site access or site drainage" } },
@@ -111,7 +111,7 @@ async function serve(request: Request): Promise<Response> {
         const fit = result.answers?.service_fit, scope = result.answers?.scope_clarity;
         if (!fit || !scope || !Number.isFinite(fit.score) || !Number.isFinite(scope.score) || fit.score! < 0 || fit.score! > 4 || scope.score! < 0 || scope.score! > 2) throw new ApiError(502, "Jev returned an assessment we couldn't validate.");
         const freshness = Math.max(0, Math.min(1, 1 - (ageInDays(permit.issuedAt) ?? 30) / 30));
-        const assessment: Assessment = { score: Math.round((fit.score! / 4 * 0.7 + scope.score! / 2 * 0.2 + freshness * 0.1) * 100), confidence: Number.isFinite(fit.confidence) ? Math.max(0, Math.min(1, fit.confidence!)) : null, trade: result.answers?.trade?.choice || permit.trade, model: result.model || "jev-latest", assessedAt: new Date().toISOString() };
+        const assessment: Assessment = { score: Math.round((fit.score! / 4 * 0.7 + scope.score! / 2 * 0.2 + freshness * 0.1) * 100), confidence: Number.isFinite(fit.confidence) ? Math.max(0, Math.min(1, fit.confidence!)) : null, trade: result.answers?.trade?.choice || permit.trade, model: result.model || "typesafe/jev", assessedAt: new Date().toISOString() };
         await db.insert(assessments).values({ userId, permitId: id, inputHash, payload: JSON.stringify(assessment), createdAt: Date.now() }).onConflictDoUpdate({ target: [assessments.userId, assessments.permitId], set: { inputHash, payload: JSON.stringify(assessment), createdAt: Date.now() } });
         results[id] = assessment;
       }

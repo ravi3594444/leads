@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pbkdf2Sync } from 'node:crypto';
 import { COUNTIES, DEFAULT_FILTERS, DEFAULT_PROFILE } from '../lib/types.ts';
-import { demoPermits } from '../lib/demo-data.ts';
+import { fixturePermits } from './permit-fixtures.ts';
 import { ageInDays, comparePermits, makeCsv, matchesFilters, scorePermit, summarize } from '../lib/permit-utils.ts';
 import { constantTimeEqual, passwordHash, sessionCookie, sessionToken } from '../lib/password.ts';
 
 const now = new Date('2026-10-05T18:00:00Z');
-const permits = demoPermits(now);
+const permits = fixturePermits(now);
 
 test('county choices cover 67 distinct Florida counties', () => {
   assert.equal(COUNTIES.length, 67);
@@ -23,7 +23,7 @@ test('permit age does not drift across daylight-saving transitions', () => {
 });
 test('sample permits keep the correct Florida day near UTC midnight', () => {
   const late = new Date('2026-10-06T02:00:00Z');
-  assert.equal(ageInDays(demoPermits(late)[0].issuedAt, late), 0);
+  assert.equal(ageInDays(fixturePermits(late)[0].issuedAt, late), 0);
 });
 test('open filters exclude unknown status even if an issue date exists', () => {
   const unknown = permits.find(p => p.status === 'Unknown');
@@ -61,14 +61,14 @@ test('summary counts represent records and preserve unknown statuses', () => {
   assert.equal(stats.commercial, 32);
   assert.ok(stats.open < stats.total);
 });
-test('CSV includes notes, contact roles and a sample-data flag while neutralizing formulas', () => {
+test('CSV includes notes and contact roles while neutralizing formulas', () => {
   const p = { ...permits[0], businessName: '=HYPERLINK("https://example.com")', contactName: 'Applicant, one' };
   const csv = makeCsv([p], { [p.id]: { status: 'saved', notes: 'first line\nsecond "line"' } });
   assert.ok(csv.includes('"\'=HYPERLINK('));
   assert.ok(csv.includes('"Applicant, one"'));
   assert.ok(csv.includes('second ""line""'));
-  assert.ok(csv.includes('"Demo record"'));
-  assert.ok(csv.endsWith('"yes"'));
+  assert.ok(!csv.includes('Demo record'));
+  assert.ok(csv.includes('first line'));
 });
 test('password derivation interoperates with Node crypto and distinguishes wrong passwords', async () => {
   const password = 'test-only-password', salt = 'test-only-salt';

@@ -78,7 +78,7 @@ function csvCell(value: unknown): string {
   return `"${text.replaceAll('"', '""')}"`;
 }
 export function makeCsv(permits: Permit[], leads: Record<string, LeadState>): string {
-  const columns = ["Permit number", "Project", "Business", "County", "City", "Address", "Trade", "Issue date", "Permit status", "Property type", "Project value USD", "Priority index", "Lead status", "Contact name", "Contact role", "Phone", "Email", "Source", "Notes", "Demo record"];
-  const rows = permits.map(p => [p.permitNumber, p.title, p.businessName, p.county, p.city, p.address, p.trade, p.issuedAt, p.rawStatus, p.propertyType, p.value, p.priority, leads[p.id]?.status || "new", p.contactName, p.contactRole, p.phone, p.email, p.sourceUrl, leads[p.id]?.notes || "", p.demo ? "yes" : "no"]);
+  const columns = ["Permit number", "Project", "Business", "County", "City", "Address", "Trade", "Issue date", "Permit status", "Property type", "Project value USD", "Priority index", "Lead status", "Contact name", "Contact role", "Phone", "Email", "Source", "Notes"];
+  const rows = permits.map(p => [p.permitNumber, p.title, p.businessName, p.county, p.city, p.address, p.trade, p.issuedAt, p.rawStatus, p.propertyType, p.value, p.priority, leads[p.id]?.status || "new", p.contactName, p.contactRole, p.phone, p.email, p.sourceUrl, leads[p.id]?.notes || ""]);
   return "\ufeff" + [columns, ...rows].map(row => row.map(csvCell).join(",")).join("\r\n");
 }

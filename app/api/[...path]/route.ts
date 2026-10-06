@@ -7,7 +7,7 @@ import { constantTimeEqual, passwordHash, randomHex, sessionCookie, sessionToken
 import { ageInDays, makeCsv } from "../../../lib/permit-utils";
 import type { Assessment, LeadState } from "../../../lib/types";
 import { ApiError, assertSameOrigin, body, getAccount, handleError, initializeAccount, isUnlocked, issueSession, json, platformUser, unlockedUser } from "../../../server/http";
-import { assessmentInput, leadsFor, permitById, permitPage, profileFor, profileSchema, sourcesFor } from "../../../server/data";
+import { assessmentInput, backendConnected, leadsFor, permitById, permitExport, permitPage, profileFor, profileSchema, sourcesFor, useCollectorApi } from "../../../server/data";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -46,7 +46,7 @@ async function serve(request: Request): Promise<Response> {
 
     const user = await unlockedUser(request), userId = user.userId, db = getDb();
     if (path === "workspace" && request.method === "GET") {
-      return json({ profile: await profileFor(userId), leads: await leadsFor(userId), jevConnected: !!env.AIMLAPI_KEY, backendConnected: !!env.PERMIT_API_URL, displayName: user.fullName || "Your workspace" });
+      return json({ profile: await profileFor(userId), leads: await leadsFor(userId), jevConnected: !!env.AIMLAPI_KEY, backendConnected: await backendConnected(), displayName: user.fullName || "Your workspace" });
     }
     if (path === "profile" && request.method === "POST") {
       const profile = profileSchema.parse(await body(request));
@@ -77,18 +77,17 @@ async function serve(request: Request): Promise<Response> {
     if (path.startsWith("permits/") && request.method === "GET") return json({ permit: await permitById(userId, decodeURIComponent(path.slice(8))) });
     if (path === "sources" && request.method === "GET") return json(await sourcesFor());
     if (path === "export" && request.method === "GET") {
-      if (env.PERMIT_API_URL) {
+      if (useCollectorApi()) {
         const query = new URLSearchParams(url.searchParams); query.set("profile", JSON.stringify(await profileFor(userId)));
         const viewLeads = await leadsFor(userId);
         if (query.get("view") === "saved") query.set("ids", Object.keys(viewLeads).filter(id => !["new", "dismissed"].includes(viewLeads[id].status) && (!query.get("leadStatus") || query.get("leadStatus") === "all" || viewLeads[id].status === query.get("leadStatus"))).join(","));
         query.set("dismissedIds", Object.keys(viewLeads).filter(id => viewLeads[id].status === "dismissed").join(","));
-        const response = await fetch(`${env.PERMIT_API_URL.replace(/\/$/, "")}/api/permits/export?${query}`, { headers: { ...(env.PERMIT_API_TOKEN ? { Authorization: `Bearer ${env.PERMIT_API_TOKEN}` } : {}) }, signal: AbortSignal.timeout(20000) });
+        const response = await fetch(`${env.PERMIT_API_URL!.replace(/\/$/, "")}/api/permits/export?${query}`, { headers: { Authorization: `Bearer ${env.PERMIT_API_TOKEN}` }, signal: AbortSignal.timeout(20000) });
         if (!response.ok) throw new ApiError(502, "The permit feed could not export these results.");
         return new Response(response.body, { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="permitline-permits.csv"', "Cache-Control": "no-store" } });
       }
-      const params = new URLSearchParams(url.searchParams); params.set("page", "1"); params.set("pageSize", "50");
-      const page = await permitPage(userId, params);
-      return new Response(makeCsv(page.permits, await leadsFor(userId)), { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="permitline-demo-permits.csv"', "Cache-Control": "no-store" } });
+      const exported = await permitExport(userId, url.searchParams);
+      return new Response(makeCsv(exported.permits, await leadsFor(userId)), { headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="permitline-permits.csv"', "Cache-Control": "no-store, private", "X-Exported-Rows": String(exported.permits.length), "X-Total-Matching": String(exported.total), "X-Export-Limit": String(exported.limit) } });
     }
     if (path === "jev/assess" && request.method === "POST") {
       if (!env.AIMLAPI_KEY) throw new ApiError(409, "Jev isn't connected yet. Use the priority preview while we connect your API key.");

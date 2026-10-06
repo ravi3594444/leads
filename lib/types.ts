@@ -17,7 +17,7 @@ export interface Permit {
 }
 export interface Source { id: string; name: string; county: string; url: string; format: string; status: "not-connected" | "healthy" | "stale" | "error"; lastSuccessAt: string | null; newestRecordAt: string | null; note: string }
 export interface PermitStats { total: number; today: number; yesterday: number; twoDays: number; week: number; older: number; commercial: number; open: number; strongFit: number }
-export interface PermitPage { permits: Permit[]; total: number; page: number; pageSize: number; stats: PermitStats | null; mode: "demo" | "live"; updatedAt: string }
+export interface PermitPage { permits: Permit[]; total: number; page: number; pageSize: number; stats: PermitStats | null; mode: "live"; updatedAt: string }
 export interface WorkspaceData { profile: Profile; leads: Record<string, LeadState>; jevConnected: boolean; backendConnected: boolean; displayName: string }
 export interface Filters { q: string; county: string; trade: string; status: string; propertyType: string; age: AgeFilter; sort: string; onlyServiceArea: boolean; leadStatus: string; minimumValue: number; hideDismissed: boolean }
 export const DEFAULT_FILTERS: Filters = { q: "", county: "all", trade: "all", status: "all", propertyType: "all", age: "all", sort: "newest", onlyServiceArea: false, leadStatus: "all", minimumValue: 0, hideDismissed: true };

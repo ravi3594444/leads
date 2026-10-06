@@ -6,6 +6,7 @@ import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import * as schema from '../db/schema.ts';
+import { fixturePermits, SOURCES } from './permit-fixtures.ts';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'permitline-postgres-test-'));
 const origin = 'https://permitline.test';
@@ -21,6 +22,40 @@ before(async () => {
   postgres = new PGlite(directory);
   await postgres.exec('CREATE ROLE anon; CREATE ROLE authenticated;');
   await postgres.exec(readFileSync(new URL('../db/schema.sql', import.meta.url), 'utf8'));
+  await postgres.exec(`CREATE TABLE public.permit_sources (
+    id text PRIMARY KEY, name text, county text, endpoint text, connector_type text,
+    connector_status text, enabled boolean, notes text, publication_cadence text, poll_interval_minutes integer
+  );
+  CREATE TABLE public.source_checkpoints (
+    source_id text, last_success_at timestamptz, last_error_at timestamptz, newest_record_at timestamptz
+  );
+  CREATE TABLE public.permits (
+    id uuid PRIMARY KEY, permit_number text, description text, address text, city text,
+    county text, county_name text, dashboard_trade text, dashboard_status text, property_class text,
+    issue_date date, application_date date, project_value numeric, status_raw text,
+    source_id text, source_url text, record_url text, applicant_name text, applicant_company text,
+    applicant_phone text, owner_name text, contractor_name text, contractor_phone text,
+    business_names text[], contacts jsonb, first_seen_at timestamptz, last_seen_at timestamptz,
+    last_changed_at timestamptz, source_updated_at timestamptz, has_listed_contact boolean
+  );`);
+  for (const source of SOURCES) {
+    await postgres.query('INSERT INTO public.permit_sources VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+      [source.id, source.name, source.county, source.url, source.format, source.id === 'lake' ? 'blocked' : 'working', source.id !== 'lake', source.note, 'Published daily', 20]);
+    if (source.id !== 'lake') await postgres.query('INSERT INTO public.source_checkpoints VALUES ($1,now(),NULL,now())', [source.id]);
+  }
+  for (const [index, permit] of fixturePermits().entries()) {
+    const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`;
+    await postgres.query(`INSERT INTO public.permits (id,permit_number,description,address,city,county,county_name,
+      dashboard_trade,dashboard_status,property_class,issue_date,application_date,project_value,status_raw,
+      source_id,source_url,record_url,applicant_name,applicant_company,applicant_phone,business_names,contacts,
+      first_seen_at,last_seen_at,last_changed_at,source_updated_at,has_listed_contact)
+      VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$16,$17,$18,$19,$20,$21,$21,$21,$21,$22)`,
+      [id, `TEST-${index + 1}`, permit.description, permit.address, permit.city, permit.county, permit.trade, permit.status,
+        permit.propertyType.toLowerCase(), permit.issuedAt.slice(0, 10), permit.appliedAt.slice(0, 10), permit.value,
+        permit.rawStatus, permit.sourceId, permit.sourceUrl, permit.contactName, permit.businessName, permit.phone,
+        [permit.businessName], JSON.stringify(permit.contactName ? [{ role: 'applicant', name: permit.contactName, phone: permit.phone }] : []),
+        permit.firstSeenAt, !!permit.phone]);
+  }
   database = drizzle(postgres, { schema });
   mock.module(new URL('../db/index.ts', import.meta.url).href, { namedExports: { getDb: () => database } });
   handler = await import('../app/api/[...path]/route.ts');
@@ -48,6 +83,7 @@ test('first login uses the configured password and stores only its salted hash',
   const result = await postgres.query('SELECT password_hash FROM permitline_dashboard.workspace_accounts');
   assert.notEqual(result.rows[0].password_hash, password); assert.equal(result.rows[0].password_hash.length, 64);
   assert.equal((await request('/api/workspace')).status, 200);
+  assert.equal((await (await request('/api/workspace')).json()).backendConnected, true);
 });
 test('Postgres schema is idempotent and blocks client database roles', async () => {
   await postgres.exec(readFileSync(new URL('../db/schema.sql', import.meta.url), 'utf8'));
@@ -60,22 +96,79 @@ test('Postgres schema is idempotent and blocks client database roles', async () 
   }
 });
 test('cross-origin writes are rejected and authenticated filtering works', async () => {
-  assert.equal((await request('/api/leads', { method: 'POST', requestOrigin: 'https://another.test', body: { updates: [{ id: 'demo-001', status: 'saved' }] } })).status, 403);
+  assert.equal((await request('/api/leads', { method: 'POST', requestOrigin: 'https://another.test', body: { updates: [{ id: '00000000-0000-4000-8000-000000000001', status: 'saved' }] } })).status, 403);
   const all = await (await request('/api/permits?pageSize=10')).json();
-  assert.equal(all.total, 36); assert.equal(all.permits.length, 10); assert.equal(all.mode, 'demo');
+  assert.equal(all.total, 36); assert.equal(all.permits.length, 10); assert.equal(all.mode, 'live');
   const filtered = await (await request('/api/permits?county=Orange&trade=HVAC&age=today&propertyType=Commercial')).json();
   assert.equal(filtered.total, 1);
 });
+test('database filters and ordering run before pagination, with stable IDs', async () => {
+  const first = await (await request('/api/permits?county=Orange&pageSize=1&sort=value')).json();
+  const second = await (await request('/api/permits?county=Orange&pageSize=1&sort=value&page=2')).json();
+  assert.ok(first.total > 1);
+  assert.equal(second.total, first.total);
+  assert.equal(first.permits.length, 1);
+  assert.ok(first.permits[0].value > second.permits[0].value);
+  assert.notEqual(first.permits[0].id, second.permits[0].id);
+  assert.equal(first.permits[0].demo, false);
+  const detail = await (await request(`/api/permits/${first.permits[0].id}`)).json();
+  assert.equal(detail.permit.businessName, first.permits[0].businessName);
+  assert.equal(detail.permit.contactRole, 'Applicant');
+  assert.equal((await request('/api/permits/not-a-record')).status, 404);
+  assert.equal((await (await request('/api/permits?q=%27%20OR%201%3D1%20--')).json()).total, 0);
+});
+test('source health and missing or empty feeds never return demo permits', async () => {
+  const sources = await (await request('/api/sources')).json();
+  assert.equal(sources.mode, 'live');
+  assert.equal(sources.sources.find(s => s.id === 'orlando').status, 'healthy');
+  assert.equal(sources.sources.find(s => s.id === 'lake').status, 'error');
+  await postgres.exec('BEGIN; DELETE FROM public.permits;');
+  try {
+    const empty = await (await request('/api/permits')).json();
+    assert.equal(empty.total, 0); assert.deepEqual(empty.permits, []); assert.equal(empty.mode, 'live');
+  } finally { await postgres.exec('ROLLBACK'); }
+  await postgres.exec('ALTER TABLE public.permits RENAME TO unavailable_permits');
+  try {
+    const missing = await request('/api/permits');
+    assert.equal(missing.status, 503);
+    assert.match((await missing.json()).error, /collector tables/i);
+    assert.equal((await (await request('/api/workspace')).json()).backendConnected, false);
+  } finally { await postgres.exec('ALTER TABLE public.unavailable_permits RENAME TO permits'); }
+});
+test('a missing optional API token uses the existing database connection', async () => {
+  process.env.PERMIT_API_URL = 'https://collector.example.test';
+  delete process.env.PERMIT_API_TOKEN;
+  try { assert.equal((await (await request('/api/permits')).json()).total, 36); }
+  finally { delete process.env.PERMIT_API_URL; }
+});
+test('full CSV uses matching records beyond one page and reports its limit', async () => {
+  await postgres.exec('BEGIN');
+  try {
+    for (let i = 0; i < 60; i++) await postgres.query(`INSERT INTO public.permits
+      (id,source_id,permit_number,dashboard_trade,dashboard_status,property_class,issue_date,county,county_name,first_seen_at,last_seen_at)
+      VALUES ($1,'orlando',$2,'HVAC','Issued','commercial',current_date,'Orange','Orange',now(),now())`,
+      [`10000000-0000-4000-8000-${String(i).padStart(12,'0')}`, `EXPORT-TEST-${i}`]);
+    const exported = await request('/api/export');
+    assert.equal(exported.status, 200);
+    assert.equal(exported.headers.get('X-Exported-Rows'), '96');
+    assert.equal(exported.headers.get('X-Total-Matching'), '96');
+    assert.match(await exported.text(), /EXPORT-TEST-59/);
+    const limited = await request('/api/export?limit=5&county=Orange');
+    assert.equal(limited.headers.get('X-Exported-Rows'), '5');
+    assert.ok(Number(limited.headers.get('X-Total-Matching')) > 5);
+    assert.equal(limited.headers.get('X-Export-Limit'), '5');
+  } finally { await postgres.exec('ROLLBACK'); }
+});
 test('partial sales-state updates preserve notes in Postgres and CSV', async () => {
-  assert.equal((await request('/api/leads', { method: 'POST', body: { updates: [{ id: 'demo-001', status: 'saved', notes: 'Local database test note.' }] } })).status, 200);
-  assert.equal((await request('/api/leads', { method: 'POST', body: { updates: [{ id: 'demo-001', status: 'contacted' }] } })).status, 200);
+  assert.equal((await request('/api/leads', { method: 'POST', body: { updates: [{ id: '00000000-0000-4000-8000-000000000001', status: 'saved', notes: 'Local database test note.' }] } })).status, 200);
+  assert.equal((await request('/api/leads', { method: 'POST', body: { updates: [{ id: '00000000-0000-4000-8000-000000000001', status: 'contacted' }] } })).status, 200);
   const workspace = await (await request('/api/workspace')).json();
-  assert.equal(workspace.leads['demo-001'].notes, 'Local database test note.');
+  assert.equal(workspace.leads['00000000-0000-4000-8000-000000000001'].notes, 'Local database test note.');
   const csv = await (await request('/api/export?view=saved')).text(); assert.match(csv, /Local database test note/);
 });
 test('preferences persist and unconfigured Jev returns an explicit error', async () => {
   assert.equal((await request('/api/profile', { method: 'POST', body: { company: 'Test business', trades: ['HVAC'], counties: ['Orange'], commercialOnly: true, minimumValue: 0, jevEnabled: false } })).status, 200);
-  const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-001'] } }); assert.equal(response.status, 409);
+  const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['00000000-0000-4000-8000-000000000001'] } }); assert.equal(response.status, 409);
 });
 test('Jev uses AI/ML API with typed questions and reuses a cached assessment', async context => {
   process.env.AIMLAPI_KEY = 'test-only-aiml-key';
@@ -108,22 +201,22 @@ test('Jev uses AI/ML API with typed questions and reuses a cached assessment', a
     // A cached decision from the previous provider must not suppress the AI/ML call.
     const { assessmentInput } = await import('../server/data.ts');
     const { sha256 } = await import('../lib/password.ts');
-    const permit = (await (await request('/api/permits/demo-001')).json()).permit;
+    const permit = (await (await request('/api/permits/00000000-0000-4000-8000-000000000001')).json()).permit;
     const oldState = JSON.parse(assessmentInput(permit, workspace.profile));
     delete oldState.assessmentVersion;
-    await postgres.query('INSERT INTO permitline_dashboard.jev_assessments (user_id, permit_id, input_hash, payload, created_at) VALUES ($1,$2,$3,$4,$5)', ['test-owner', 'demo-001', await sha256(JSON.stringify(oldState)), JSON.stringify({ score: 1, model: 'previous-provider' }), Date.now()]);
-    assert.equal((await request('/api/jev/assess', { method: 'POST', session: null, body: { ids: ['demo-001'] } })).status, 401);
-    const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-001'] } });
+    await postgres.query('INSERT INTO permitline_dashboard.jev_assessments (user_id, permit_id, input_hash, payload, created_at) VALUES ($1,$2,$3,$4,$5)', ['test-owner', '00000000-0000-4000-8000-000000000001', await sha256(JSON.stringify(oldState)), JSON.stringify({ score: 1, model: 'previous-provider' }), Date.now()]);
+    assert.equal((await request('/api/jev/assess', { method: 'POST', session: null, body: { ids: ['00000000-0000-4000-8000-000000000001'] } })).status, 401);
+    const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['00000000-0000-4000-8000-000000000001'] } });
     assert.equal(response.status, 200);
-    const result = (await response.json()).assessments['demo-001'];
+    const result = (await response.json()).assessments['00000000-0000-4000-8000-000000000001'];
     assert.equal(result.model, 'typesafe/jev-1.13-20260917');
     assert.equal(result.confidence, 0.91);
     assert.equal(result.trade, 'HVAC');
     assert.ok(Number.isInteger(result.score) && result.score > 70 && result.score <= 100);
-    const repeat = await (await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-001', 'demo-001'] } })).json();
-    assert.deepEqual(repeat.assessments['demo-001'], result);
+    const repeat = await (await request('/api/jev/assess', { method: 'POST', body: { ids: ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000001'] } })).json();
+    assert.deepEqual(repeat.assessments['00000000-0000-4000-8000-000000000001'], result);
     assert.equal(calls, 1);
-    const detail = (await (await request('/api/permits/demo-001')).json()).permit;
+    const detail = (await (await request('/api/permits/00000000-0000-4000-8000-000000000001')).json()).permit;
     assert.equal(detail.priority, result.score);
     assert.equal(detail.assessment.model, result.model);
     assert.equal((await request('/api/profile', { method: 'POST', body: profile })).status, 200);
@@ -133,10 +226,10 @@ test('AI/ML provider errors do not create a cached decision', async context => {
   process.env.AIMLAPI_KEY = 'test-only-aiml-key';
   context.mock.method(globalThis, 'fetch', async () => new Response('Provider refused the request', { status: 401 }));
   try {
-    const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-002'] } });
+    const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['00000000-0000-4000-8000-000000000002'] } });
     assert.equal(response.status, 502);
     assert.match((await response.json()).error, /Jev/);
-    const rows = await postgres.query("SELECT permit_id FROM permitline_dashboard.jev_assessments WHERE permit_id='demo-002'");
+    const rows = await postgres.query("SELECT permit_id FROM permitline_dashboard.jev_assessments WHERE permit_id='00000000-0000-4000-8000-000000000002'");
     assert.equal(rows.rows.length, 0);
   } finally { delete process.env.AIMLAPI_KEY; }
 });
@@ -146,15 +239,15 @@ test('out-of-range AI/ML scores are refused instead of saved', async context => 
     service_fit: { score: 5, confidence: 0.9 }, scope_clarity: { score: 1 }, trade: { choice: 'HVAC' },
   } }));
   try {
-    assert.equal((await request('/api/jev/assess', { method: 'POST', body: { ids: ['demo-003'] } })).status, 502);
-    const rows = await postgres.query("SELECT permit_id FROM permitline_dashboard.jev_assessments WHERE permit_id='demo-003'");
+    assert.equal((await request('/api/jev/assess', { method: 'POST', body: { ids: ['00000000-0000-4000-8000-000000000003'] } })).status, 502);
+    const rows = await postgres.query("SELECT permit_id FROM permitline_dashboard.jev_assessments WHERE permit_id='00000000-0000-4000-8000-000000000003'");
     assert.equal(rows.rows.length, 0);
   } finally { delete process.env.AIMLAPI_KEY; }
 });
 test('sessions and notes survive a database restart', async () => {
   await postgres.close(); postgres = new PGlite(directory); database = drizzle(postgres, { schema });
   const workspace = await (await request('/api/workspace')).json();
-  assert.equal(workspace.profile.company, 'Test business'); assert.equal(workspace.leads['demo-001'].status, 'contacted');
+  assert.equal(workspace.profile.company, 'Test business'); assert.equal(workspace.leads['00000000-0000-4000-8000-000000000001'].status, 'contacted');
 });
 test('password changes revoke old sessions and keep the new session usable', async () => {
   const old = cookie;

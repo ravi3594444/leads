@@ -1,5 +1,6 @@
-import type { Permit, Source, Trade } from "./types";
-import { floridaDay } from "./permit-utils.ts";
+// Synthetic records used exclusively by disposable automated tests.
+import type { Permit, Source, Trade } from "../lib/types";
+import { floridaDay } from "../lib/permit-utils.ts";
 export const SOURCES: Source[] = [
   { id: "miami-city", name: "City of Miami", county: "Miami-Dade", url: "https://www.miami.gov/Permits-Construction", format: "ArcGIS", status: "not-connected", lastSuccessAt: null, newestRecordAt: null, note: "City-issued permits; separate from county-issued records." },
   { id: "miami-dade", name: "Miami-Dade County", county: "Miami-Dade", url: "https://www.miamidade.gov/permits/", format: "ArcGIS", status: "not-connected", lastSuccessAt: null, newestRecordAt: null, note: "The researched public feed does not include current permit status." },
@@ -46,7 +47,7 @@ const seeds: [string, string, string, string, Trade, number, number | null, stri
   ["Fern Street Clinic", "Clinic electrical work", "Orlando", "orlando", "Electrical", 14, 61000, "Electrical modifications for a healthcare tenant improvement."],
   ["Lemon Bay Lodge", "Hospitality HVAC", "Port Charlotte", "charlotte", "HVAC", 18, 73000, "Mechanical equipment upgrades at a hospitality building."],
 ];
-export function demoPermits(now = new Date()): Permit[] {
+export function fixturePermits(now = new Date()): Permit[] {
   return seeds.map(([business, title, city, sourceId, trade, age, value, description], index) => {
     const source = SOURCES.find(item => item.id === sourceId)!;
     const issue = new Date(`${floridaDay(now)}T14:30:00Z`); issue.setUTCDate(issue.getUTCDate() - age); issue.setUTCMinutes(30 - (index % 20));

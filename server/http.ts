@@ -2,6 +2,7 @@ import { and, eq, gt } from "drizzle-orm";
 import { getDb } from "../db";
 import { accounts, sessions } from "../db/schema";
 import { passwordHash, randomHex, sessionCookie, sessionToken, sha256, SESSION_SECONDS } from "../lib/password";
+import { safeFailure } from "./failure";
 
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 export function json(value: unknown, status = 200, extra: Record<string, string> = {}): Response {
@@ -51,6 +52,7 @@ export async function initializeAccount(userId: string) {
 export async function handleError(error: unknown): Promise<Response> {
   if (error instanceof ApiError) return json({ error: error.message }, error.status);
   if (error && typeof error === "object" && "name" in error && error.name === "ZodError") return json({ error: "Please check the fields and try again." }, 400);
-  console.error("Permitline request failed:", error instanceof Error ? error.name : "Unknown error");
-  return json({ error: "The workspace could not complete this request. Please try again." }, 503);
+  const failure = safeFailure(error);
+  console.error("Permitline request failed:", { errorCode: failure.errorCode, codes: failure.codes });
+  return json({ error: failure.error, errorCode: failure.errorCode }, 503);
 }

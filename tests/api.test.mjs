@@ -168,3 +168,18 @@ test('locking deletes the session and repeated wrong passwords trigger a persist
   for (let attempt = 0; attempt < 5; attempt++) assert.equal((await request('/api/auth/login', { method: 'POST', session: null, body: { password: 'wrong-test-only-password' } })).status, 401);
   assert.equal((await request('/api/auth/login', { method: 'POST', session: null, body: { password: 'changed-test-only-password' } })).status, 429);
 });
+test('startup reveals a safe underlying connection code without leaking private error content', async context => {
+  const secret = 'test-only-secret-that-must-not-be-logged';
+  const cause = Object.assign(new Error(`Connection credentials: ${secret}`), { code: 'SELF_SIGNED_CERT_IN_CHAIN' });
+  context.mock.method(database, 'select', () => { throw new Error(`Failed SQL containing ${secret}`, { cause }); });
+  const logs = [];
+  context.mock.method(console, 'error', (...args) => logs.push(args));
+  const response = await request('/api/auth/status', { session: null });
+  assert.equal(response.status, 503);
+  const result = await response.json();
+  assert.equal(result.errorCode, 'SELF_SIGNED_CERT_IN_CHAIN');
+  assert.match(result.error, /DATABASE_CA_CERT/);
+  assert.ok(!JSON.stringify(result).includes(secret));
+  assert.ok(!JSON.stringify(logs).includes(secret));
+  assert.match(JSON.stringify(logs), /SELF_SIGNED_CERT_IN_CHAIN/);
+});

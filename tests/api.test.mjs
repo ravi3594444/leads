@@ -161,6 +161,59 @@ test('indexed filters preserve fallback fields, private sales states and global 
     }
   } finally { await postgres.exec('ROLLBACK'); }
 });
+test('application dates drive date filters, pagination, counts, saved views and CSV', async () => {
+  const baseline = await (await request('/api/permits')).json();
+  const ids = Array.from({ length: 8 }, (_, index) => `00000000-0000-4000-8000-${String(2001 + index).padStart(12, '0')}`);
+  await postgres.exec('BEGIN');
+  try {
+    for (const [index, age] of [0, 1, 2, 6, 7, -1, null, 0].entries()) {
+      await postgres.query(`INSERT INTO public.permits
+        (id,permit_number,description,address,city,county,county_name,dashboard_trade,dashboard_status,
+         property_class,issue_date,application_date,status_raw,source_id,first_seen_at,last_seen_at)
+        VALUES ($1,$2,'Application-only project','Test address','DeLand','Volusia','Volusia',
+          'General contracting','In review','commercial',
+          CASE WHEN $3::boolean THEN (now() AT TIME ZONE 'America/New_York')::date - 8 ELSE NULL END,
+          (now() AT TIME ZONE 'America/New_York')::date - $4::integer,
+          'Application','volusia-test',now(),now())`, [ids[index], `VOLUSIA-TEST-${index}`, index === 7, age]);
+    }
+    const check = async age => {
+      const response = await request(`/api/permits?county=Volusia&age=${age}&pageSize=50`);
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+    for (const [age, index] of [['today', 0], ['yesterday', 1], ['two-days', 2]]) {
+      const page = await check(age);
+      assert.equal(page.total, 1);
+      assert.equal(page.permits[0].id, ids[index]);
+      assert.equal(page.permits[0].issuedAt, null);
+      assert.ok(page.permits[0].appliedAt);
+      assert.ok(page.permits[0].priorityReasons.some(reason => reason.startsWith('Applied')));
+    }
+    const week = await check('week');
+    assert.equal(week.total, 4);
+    assert.deepEqual(week.permits.map(permit => permit.id), ids.slice(0, 4));
+    assert.equal(week.stats.week, baseline.stats.week + 4);
+    assert.equal(week.stats.yesterday, baseline.stats.yesterday + 1);
+    assert.equal(week.stats.older, baseline.stats.older + 2);
+    const second = await (await request('/api/permits?county=Volusia&age=week&pageSize=2&page=2')).json();
+    assert.equal(second.total, 4);
+    assert.deepEqual(second.permits.map(permit => permit.id), ids.slice(2, 4));
+    const oldest = await (await request('/api/permits?county=Volusia&age=week&sort=oldest&pageSize=2')).json();
+    assert.deepEqual(oldest.permits.map(permit => permit.id), [ids[3], ids[2]]);
+    const older = await check('older');
+    assert.equal(older.total, 2);
+    assert.deepEqual(older.permits.map(permit => permit.id), [ids[4], ids[7]]);
+    await request('/api/leads', { method: 'POST', body: { updates: [{ id: ids[1], status: 'saved', notes: 'Keep this application note' }] } });
+    const saved = await (await request('/api/permits?county=Volusia&age=yesterday&view=saved')).json();
+    assert.equal(saved.total, 1); assert.equal(saved.permits[0].id, ids[1]);
+    const csvResponse = await request('/api/export?county=Volusia&age=yesterday');
+    assert.equal(csvResponse.headers.get('X-Exported-Rows'), '1');
+    const csv = await csvResponse.text();
+    assert.ok(csv.includes('"Issue date","Application date"'));
+    assert.ok(csv.includes(`"","${saved.permits[0].appliedAt}"`));
+    assert.ok(csv.includes('Keep this application note'));
+  } finally { await postgres.exec('ROLLBACK'); }
+});
 test('source health and missing or empty feeds never return demo permits', async () => {
   const sources = await (await request('/api/sources')).json();
   assert.equal(sources.mode, 'live');

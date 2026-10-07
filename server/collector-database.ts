@@ -49,13 +49,13 @@ function baseQuery(userId: string, profile: Profile, where: SQL = sql`true`): SQ
       COALESCE(NULLIF(p.dashboard_trade, ''), 'General contracting') AS trade,
       COALESCE(NULLIF(p.dashboard_status, ''), 'Unknown') AS status,
       CASE p.property_class WHEN 'commercial' THEN 'Commercial' WHEN 'residential' THEN 'Residential' ELSE 'Unknown' END AS property_type,
-      p.issue_date, p.application_date, p.project_value, p.status_raw,
+      p.issue_date, p.application_date, COALESCE(p.issue_date, p.application_date) AS activity_date, p.project_value, p.status_raw,
       p.source_id, s.name AS source_name, p.source_url, p.record_url,
       p.applicant_name, p.applicant_company, p.applicant_phone, p.owner_name,
       p.contractor_name, p.contractor_phone, p.business_names, p.contacts,
       p.first_seen_at, p.last_seen_at, p.last_changed_at, p.source_updated_at,
       COALESCE(NULLIF(p.applicant_company, ''), p.business_names[1]) AS business_name,
-      (now() AT TIME ZONE 'America/New_York')::date - p.issue_date AS age,
+      (now() AT TIME ZONE 'America/New_York')::date - COALESCE(p.issue_date, p.application_date) AS age,
       p.has_listed_contact, COALESCE(l.status, 'new') AS lead_status
     FROM public.permits p
     LEFT JOIN public.permit_sources s ON s.id = p.source_id
@@ -63,7 +63,7 @@ function baseQuery(userId: string, profile: Profile, where: SQL = sql`true`): SQ
     WHERE ${where}
   ), scored AS NOT MATERIALIZED (
     SELECT *, GREATEST(0, LEAST(100,
-      30 + CASE WHEN age BETWEEN 0 AND 7 THEN GREATEST(0, 18 - age * 2) ELSE 0 END
+      30 + CASE WHEN age BETWEEN 0 AND 6 THEN GREATEST(0, 18 - age * 2) ELSE 0 END
       + CASE status WHEN 'Issued' THEN 12 WHEN 'In review' THEN 7 WHEN 'Closed' THEN -35 ELSE 0 END
       + CASE WHEN property_type = 'Commercial' THEN 8 ELSE 0 END
       + CASE WHEN ${profile.trades.length > 0} THEN CASE WHEN ${tradeMatch} THEN 22 ELSE -25 END ELSE 0 END
@@ -97,19 +97,20 @@ function filterQuery(filters: Filters, profile: Profile, savedOnly: boolean): SQ
     if (profile.trades.length && !profile.trades.includes("General contracting")) clauses.push(normalizedFilter(sql`p.dashboard_trade`, profile.trades, "General contracting"));
   }
   const today = sql`(now() AT TIME ZONE 'America/New_York')::date`;
-  if (filters.age === "today") clauses.push(sql`p.issue_date = ${today}`);
-  if (filters.age === "yesterday") clauses.push(sql`p.issue_date = ${today} - 1`);
-  if (filters.age === "two-days") clauses.push(sql`p.issue_date = ${today} - 2`);
-  if (filters.age === "week") clauses.push(sql`p.issue_date BETWEEN ${today} - 7 AND ${today}`);
-  if (filters.age === "older") clauses.push(sql`p.issue_date < ${today} - 7`);
+  const activityDate = sql`COALESCE(p.issue_date, p.application_date)`;
+  if (filters.age === "today") clauses.push(sql`${activityDate} = ${today}`);
+  if (filters.age === "yesterday") clauses.push(sql`${activityDate} = ${today} - 1`);
+  if (filters.age === "two-days") clauses.push(sql`${activityDate} = ${today} - 2`);
+  if (filters.age === "week") clauses.push(sql`${activityDate} BETWEEN ${today} - 6 AND ${today}`);
+  if (filters.age === "older") clauses.push(sql`${activityDate} < ${today} - 6`);
   return clauses.length ? sql.join(clauses, sql` AND `) : sql`true`;
 }
 
 function orderQuery(sort: string): SQL {
-  if (sort === "priority") return sql`priority DESC, issue_date DESC NULLS LAST, id`;
-  if (sort === "value") return sql`project_value DESC NULLS LAST, issue_date DESC NULLS LAST, id`;
-  if (sort === "oldest") return sql`issue_date ASC NULLS LAST, id`;
-  return sql`issue_date DESC NULLS LAST, id`;
+  if (sort === "priority") return sql`priority DESC, activity_date DESC NULLS LAST, id`;
+  if (sort === "value") return sql`project_value DESC NULLS LAST, activity_date DESC NULLS LAST, id`;
+  if (sort === "oldest") return sql`activity_date ASC NULLS LAST, id`;
+  return sql`activity_date DESC NULLS LAST, id`;
 }
 
 export async function collectorPage(userId: string, profile: Profile, filters: Filters, savedOnly: boolean, page: number, pageSize: number): Promise<{ rows: Row[]; total: number; stats: PermitStats; updatedAt: string | null }> {
@@ -120,7 +121,7 @@ export async function collectorPage(userId: string, profile: Profile, filters: F
     SELECT max(last_seen_at) AS updated_at, jsonb_build_object(
       'total', count(*), 'today', count(*) FILTER (WHERE age = 0),
       'yesterday', count(*) FILTER (WHERE age = 1), 'twoDays', count(*) FILTER (WHERE age = 2),
-      'week', count(*) FILTER (WHERE age BETWEEN 0 AND 7), 'older', count(*) FILTER (WHERE age > 7),
+      'week', count(*) FILTER (WHERE age BETWEEN 0 AND 6), 'older', count(*) FILTER (WHERE age > 6),
       'commercial', count(*) FILTER (WHERE property_type = 'Commercial'),
       'open', count(*) FILTER (WHERE status IN ('Issued', 'In review')),
       'strongFit', count(*) FILTER (WHERE priority >= 80)

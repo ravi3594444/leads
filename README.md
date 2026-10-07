@@ -57,9 +57,18 @@ The API tests use a disposable PGlite Postgres database and mock only the connec
 
 ## Permit database connection
 
-The dashboard reads collector records without copying or modifying them. Source issue dates define date groups; import timestamps do not make an old permit new. County/trade/status/value/search/sales-state filters and sorting run in SQL before pagination. Unknown status and property type remain unknown. Source health comes from the registry and collection checkpoints, including disabled and blocked feeds. A successful initial import does not establish that the scheduled routine is running.
+The dashboard reads collector records without copying or modifying them. Date groups, newest/oldest sorting and freshness use the source issue date, falling back to the application date when no issue date exists. Application-only records are labelled Applied; their issue date remains empty. Import timestamps do not make an old permit new. Last 7 days means today and the six preceding Florida calendar days, matching retention. CSV keeps issue and application dates in separate columns. County/trade/status/value/search/sales-state filters and sorting run in SQL before pagination. Unknown status and property type remain unknown. Source health comes from the registry and collection checkpoints, including disabled and blocked feeds. A successful initial import does not establish that the scheduled routine is running.
 
-Page reads load at most 50 records. SQL uses native issue dates, UUIDs and collector filter columns so existing indexes can serve the matching page. Counts use narrow projections, and overall statistics and the latest collection time are calculated together. Full records are not materialized for every permit just to render one page. Saved-state filtering stays in SQL; the direct database path does not fetch the entire private lead-state map again. Enabling Jev adds one owner-scoped cache lookup for the page, regardless of its size, and no lookup for an empty page. Browsing never calls the paid model.
+Page reads load at most 50 records. SQL uses source issue/application dates, UUIDs and collector filter columns so existing indexes can serve the matching page. Counts use narrow projections, and overall statistics and the latest collection time are calculated together. Full records are not materialized for every permit just to render one page. Saved-state filtering stays in SQL; the direct database path does not fetch the entire private lead-state map again. Enabling Jev adds one owner-scoped cache lookup for the page, regardless of its size, and no lookup for an empty page. Browsing never calls the paid model.
+
+The production database has matching indexes for newest and oldest activity-date sorts, applied as the `permit_activity_date_indexes` migration. If connecting a different collector database, apply these once through its migration process:
+
+```sql
+CREATE INDEX IF NOT EXISTS permits_activity_date_idx
+  ON public.permits ((COALESCE(issue_date, application_date)) DESC NULLS LAST, id);
+CREATE INDEX IF NOT EXISTS permits_activity_date_asc_idx
+  ON public.permits ((COALESCE(issue_date, application_date)) ASC NULLS LAST, id);
+```
 
 `vercel.json` places server functions in Mumbai (`bom1`), alongside this Supabase project's `ap-south-1` database. If you move the database, update the function region to keep database calls close to it. The password/session gate and private response headers remain in place.
 
@@ -78,7 +87,7 @@ The app sends `Authorization: Bearer <PERMIT_API_TOKEN>` from server routes. Imp
 | `GET /api/sources` | `{ sources }` |
 | `GET /api/permits/export` | Filtered CSV with formula cells neutralized |
 
-List requests send one-based `page`, `pageSize`/`limit` (up to 50), `q`, `county`, `trade`, `status`, `propertyType`, `age`, `sort`, `minimumValue`, `onlyServiceArea`, `profile`, optional `ids` for the saved view, and `dismissedIds`. Apply filters/sorting before pagination and return the filtered total. Date groups use America/New_York calendar days. `age` is `all`, `today`, `yesterday`, `two-days`, `week` (0–7 days inclusive) or `older` (more than 7 days). Sorting is `newest`, `oldest`, `priority` or `value`.
+List requests send one-based `page`, `pageSize`/`limit` (up to 50), `q`, `county`, `trade`, `status`, `propertyType`, `age`, `sort`, `minimumValue`, `onlyServiceArea`, `profile`, optional `ids` for the saved view, and `dismissedIds`. Apply filters/sorting before pagination and return the filtered total. Date groups use America/New_York calendar days. `age` is `all`, `today`, `yesterday`, `two-days`, `week` (0–6 days inclusive) or `older` (7 or more days). Sorting is `newest`, `oldest`, `priority` or `value`.
 
 `profile` is JSON containing `company`, `trades`, `counties`, `commercialOnly`, `minimumValue` and `jevEnabled`. Priority ordering uses the service profile. `ids` is a comma-separated allowlist; an explicitly empty allowlist means zero matches. `dismissedIds` are excluded unless `hideDismissed=false`.
 

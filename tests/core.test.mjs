@@ -21,6 +21,30 @@ test('permit age uses Florida calendar days across UTC midnight', () => {
 test('permit age does not drift across daylight-saving transitions', () => {
   assert.equal(ageInDays('2026-11-01T04:30:00Z', new Date('2026-11-02T05:30:00Z')), 1);
 });
+test('application-only permits use the application date without inventing an issue date', () => {
+  const application = { ...permits[0], issuedAt: null, appliedAt: '2026-10-04T12:00:00Z', firstSeenAt: now.toISOString() };
+  assert.equal(matchesFilters(application, { ...DEFAULT_FILTERS, age: 'yesterday' }, DEFAULT_PROFILE, {}, false, now), true);
+  const scored = scorePermit(application, DEFAULT_PROFILE, now);
+  assert.equal(scored.issuedAt, null);
+  assert.ok(scored.priorityReasons.includes('Applied yesterday'));
+  assert.equal(summarize([application], now).yesterday, 1);
+  assert.ok(comparePermits(permits[0], application, 'newest') < 0);
+  const issuedEarlier = { ...application, issuedAt: '2026-09-20T12:00:00Z' };
+  assert.equal(matchesFilters(issuedEarlier, { ...DEFAULT_FILTERS, age: 'week' }, DEFAULT_PROFILE, {}, false, now), false);
+  assert.equal(matchesFilters({ ...application, appliedAt: null }, { ...DEFAULT_FILTERS, age: 'today' }, DEFAULT_PROFILE, {}, false, now), false);
+  const csv = makeCsv([application], {});
+  assert.ok(csv.includes('"Issue date","Application date"'));
+  assert.ok(csv.includes('"","2026-10-04T12:00:00Z"'));
+});
+test('the seven-day window excludes future dates and the eighth calendar day', () => {
+  const sample = days => { const applied = new Date('2026-10-05T12:00:00Z'); applied.setUTCDate(applied.getUTCDate() - days); return { ...permits[0], issuedAt: null, appliedAt: applied.toISOString() }; };
+  const filters = { ...DEFAULT_FILTERS, age: 'week' };
+  for (const days of [0, 1, 2, 6]) assert.equal(matchesFilters(sample(days), filters, DEFAULT_PROFILE, {}, false, now), true);
+  for (const days of [-1, 7, 8]) assert.equal(matchesFilters(sample(days), filters, DEFAULT_PROFILE, {}, false, now), false);
+  assert.equal(matchesFilters(sample(7), { ...filters, age: 'older' }, DEFAULT_PROFILE, {}, false, now), true);
+  const stats = summarize([-1, 0, 1, 2, 6, 7, 8].map(sample), now);
+  assert.equal(stats.week, 4); assert.equal(stats.older, 2);
+});
 test('sample permits keep the correct Florida day near UTC midnight', () => {
   const late = new Date('2026-10-06T02:00:00Z');
   assert.equal(ageInDays(fixturePermits(late)[0].issuedAt, late), 0);

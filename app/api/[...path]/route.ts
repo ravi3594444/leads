@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getDb } from "../../../db";
 import { accounts, assessments, leadStates, preferences, sessions } from "../../../db/schema";
 import { constantTimeEqual, passwordHash, randomHex, sessionCookie, sessionToken, sha256 } from "../../../lib/password";
-import { ageInDays, makeCsv } from "../../../lib/permit-utils";
+import { ageInDays, makeCsv, permitActivityDate } from "../../../lib/permit-utils";
 import type { Assessment, LeadState } from "../../../lib/types";
 import { ApiError, assertSameOrigin, body, getAccount, handleError, initializeAccount, isUnlocked, issueSession, json, platformUser, unlockedUser } from "../../../server/http";
 import { assessmentInput, backendConnected, leadsFor, permitById, permitExport, permitPage, profileFor, profileSchema, sourcesFor, useCollectorApi } from "../../../server/data";
@@ -109,7 +109,7 @@ async function serve(request: Request): Promise<Response> {
         const result = await response.json() as { model?: string; answers?: Record<string, { score?: number; confidence?: number; choice?: string }> };
         const fit = result.answers?.service_fit, scope = result.answers?.scope_clarity;
         if (!fit || !scope || !Number.isFinite(fit.score) || !Number.isFinite(scope.score) || fit.score! < 0 || fit.score! > 4 || scope.score! < 0 || scope.score! > 2) throw new ApiError(502, "Jev returned an assessment we couldn't validate.");
-        const freshness = Math.max(0, Math.min(1, 1 - (ageInDays(permit.issuedAt) ?? 30) / 30));
+        const freshness = Math.max(0, Math.min(1, 1 - (ageInDays(permitActivityDate(permit)) ?? 30) / 30));
         const assessment: Assessment = { score: Math.round((fit.score! / 4 * 0.7 + scope.score! / 2 * 0.2 + freshness * 0.1) * 100), confidence: Number.isFinite(fit.confidence) ? Math.max(0, Math.min(1, fit.confidence!)) : null, trade: result.answers?.trade?.choice || permit.trade, model: result.model || "typesafe/jev", assessedAt: new Date().toISOString() };
         await db.insert(assessments).values({ userId, permitId: id, inputHash, payload: JSON.stringify(assessment), createdAt: Date.now() }).onConflictDoUpdate({ target: [assessments.userId, assessments.permitId], set: { inputHash, payload: JSON.stringify(assessment), createdAt: Date.now() } });
         results[id] = assessment;

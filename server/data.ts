@@ -63,7 +63,7 @@ export function normalizePermit(record: unknown): Permit {
     phone: r.phone || contact.phone ? String(r.phone || contact.phone) : null, email: r.email || contact.email ? String(r.email || contact.email) : null,
     firstSeenAt: iso(r.firstSeenAt || r.first_seen_at) || new Date().toISOString(), updatedAt: iso(r.updatedAt || r.updated_at || r.last_changed_at || r.source_updated_at || r.last_seen_at) || new Date().toISOString(), priority: 0, priorityReasons: [], demo: false };
 }
-export function assessmentInput(permit: Permit, profile: Profile): string { return JSON.stringify({ assessmentVersion: "aimlapi/typesafe/jev/v1", description: permit.description, trade: permit.trade, propertyType: permit.propertyType, value: permit.value, status: permit.status, issuedAt: permit.issuedAt, county: permit.county, profile }); }
+export function assessmentInput(permit: Permit, profile: Profile): string { return JSON.stringify({ assessmentVersion: "aimlapi/typesafe/jev/v1", description: permit.description, trade: permit.trade, propertyType: permit.propertyType, value: permit.value, status: permit.status, issuedAt: permit.issuedAt, appliedAt: permit.appliedAt, county: permit.county, profile }); }
 export async function withAssessments(permits: Permit[], profile: Profile, userId: string): Promise<Permit[]> {
   const scored = permits.map(permit => scorePermit(permit, profile));
   if (!profile.jevEnabled || !permits.length) return scored;

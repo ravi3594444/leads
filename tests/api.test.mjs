@@ -117,6 +117,50 @@ test('database filters and ordering run before pagination, with stable IDs', asy
   assert.equal((await request('/api/permits/not-a-record')).status, 404);
   assert.equal((await (await request('/api/permits?q=%27%20OR%201%3D1%20--')).json()).total, 0);
 });
+test('indexed filters preserve fallback fields, private sales states and global counts', async () => {
+  const { normalizePermit } = await import('../server/data.ts');
+  const { scorePermit, matchesFilters, comparePermits, summarize } = await import('../lib/permit-utils.ts');
+  const { DEFAULT_FILTERS, DEFAULT_PROFILE } = await import('../lib/types.ts');
+  const profile = { ...DEFAULT_PROFILE, trades: ['HVAC'], counties: ['Orange'], minimumValue: 50000 };
+  const states = {
+    '00000000-0000-4000-8000-000000000001': { status: 'saved', notes: 'Keep this note' },
+    '00000000-0000-4000-8000-000000000002': { status: 'dismissed', notes: '' },
+    '00000000-0000-4000-8000-000000000003': { status: 'contacted', notes: '' },
+  };
+  await postgres.exec('BEGIN');
+  try {
+    await request('/api/profile', { method: 'POST', body: profile });
+    await postgres.exec(`UPDATE public.permits SET county_name='', county='Orange County',
+      dashboard_trade='', dashboard_status=NULL, property_class=NULL
+      WHERE id='00000000-0000-4000-8000-000000000001'`);
+    for (const [id, state] of Object.entries(states)) await postgres.query(
+      'INSERT INTO permitline_dashboard.lead_states VALUES ($1,$2,$3,$4,$5)',
+      ['test-owner', id, state.status, state.notes, Date.now()]);
+    const raw = await postgres.query('SELECT p.*, p.issue_date::text AS issue_date, p.application_date::text AS application_date, s.name AS source_name FROM public.permits p LEFT JOIN public.permit_sources s ON s.id=p.source_id');
+    const all = raw.rows.map(row => scorePermit(normalizePermit(row), profile));
+    const cases = [
+      { county: 'Orange', sort: 'value' },
+      { county: 'Orange', trade: 'General contracting', status: 'Unknown', propertyType: 'Unknown' },
+      { trade: 'HVAC', status: 'open', age: 'week', sort: 'priority' },
+      { onlyServiceArea: true, minimumValue: 30000 },
+      { age: 'today' }, { age: 'yesterday' }, { age: 'two-days' }, { age: 'older', sort: 'oldest' },
+      { q: 'Cafe', hideDismissed: false }, { leadStatus: 'new' },
+      { view: 'saved' }, { view: 'saved', leadStatus: 'contacted' },
+    ];
+    for (const overrides of cases) {
+      const filters = { ...DEFAULT_FILTERS, ...overrides };
+      const expected = all.filter(permit => matchesFilters(permit, filters, profile, states, overrides.view === 'saved'))
+        .sort((a, b) => comparePermits(a, b, filters.sort));
+      const params = new URLSearchParams(Object.entries({ ...overrides, pageSize: 2, page: 2 }).map(([key, value]) => [key, String(value)]));
+      const response = await request('/api/permits?' + params);
+      assert.equal(response.status, 200, JSON.stringify(overrides));
+      const actual = await response.json();
+      assert.equal(actual.total, expected.length, JSON.stringify(overrides));
+      assert.deepEqual(actual.permits.map(permit => permit.id), expected.slice(2, 4).map(permit => permit.id), JSON.stringify(overrides));
+      assert.deepEqual(actual.stats, summarize(all), JSON.stringify(overrides));
+    }
+  } finally { await postgres.exec('ROLLBACK'); }
+});
 test('source health and missing or empty feeds never return demo permits', async () => {
   const sources = await (await request('/api/sources')).json();
   assert.equal(sources.mode, 'live');
@@ -169,6 +213,51 @@ test('partial sales-state updates preserve notes in Postgres and CSV', async () 
 test('preferences persist and unconfigured Jev returns an explicit error', async () => {
   assert.equal((await request('/api/profile', { method: 'POST', body: { company: 'Test business', trades: ['HVAC'], counties: ['Orange'], commercialOnly: true, minimumValue: 0, jevEnabled: false } })).status, 200);
   const response = await request('/api/jev/assess', { method: 'POST', body: { ids: ['00000000-0000-4000-8000-000000000001'] } }); assert.equal(response.status, 409);
+});
+test('Jev page reads use constant database round trips and isolate fresh assessments', async context => {
+  const { assessmentInput } = await import('../server/data.ts');
+  const { sha256 } = await import('../lib/password.ts');
+  process.env.AIMLAPI_KEY = 'test-only-aiml-key';
+  context.mock.method(globalThis, 'fetch', async () => { throw new Error('Listing permits must not call the paid model.'); });
+  await postgres.exec('BEGIN');
+  try {
+    const profile = { ...(await (await request('/api/workspace')).json()).profile, jevEnabled: true };
+    assert.equal((await request('/api/profile', { method: 'POST', body: profile })).status, 200);
+    await postgres.exec(`INSERT INTO public.permits
+      (id,source_id,permit_number,dashboard_trade,dashboard_status,property_class,issue_date,county,county_name,first_seen_at,last_seen_at)
+      SELECT ('20000000-0000-4000-8000-' || lpad(n::text,12,'0'))::uuid, 'orlando', 'BATCH-TEST-'||n,
+        'HVAC','Issued','commercial',(now() AT TIME ZONE 'America/New_York')::date,'Orange','Orange',now(),now()
+      FROM generate_series(1,20) n`);
+    await postgres.exec(`INSERT INTO permitline_dashboard.workspace_accounts (user_id,password_hash,password_salt,created_at)
+      SELECT 'another-owner',password_hash,password_salt,created_at FROM permitline_dashboard.workspace_accounts WHERE user_id='test-owner'`);
+    const queries = [], original = postgres.query.bind(postgres);
+    context.mock.method(postgres, 'query', async (...args) => { queries.push(args[0]); return original(...args); });
+    const small = await (await request('/api/permits?pageSize=1')).json();
+    assert.equal(small.permits.length, 1);
+    const smallQueryCount = queries.length;
+    queries.length = 0;
+    const large = await (await request('/api/permits?pageSize=50')).json();
+    assert.equal(large.permits.length, 50);
+    assert.equal(queries.length, smallQueryCount, 'Increasing the page size must not add database round trips.');
+    assert.equal(queries.filter(query => /from "permitline_dashboard"\."jev_assessments"/i.test(query)).length, 1);
+    assert.equal(queries.filter(query => /from "permitline_dashboard"\."lead_states"/i.test(query)).length, 0, 'The page query already filters saved states.');
+    const [fresh, otherOwner, outdated, malformed] = large.permits;
+    const assessment = { score: 95, confidence: 0.9, trade: 'HVAC', model: 'test-cached-model', assessedAt: new Date().toISOString() };
+    for (const [permit, owner, hash, payload] of [
+      [fresh, 'test-owner', await sha256(assessmentInput(fresh, profile)), JSON.stringify(assessment)],
+      [otherOwner, 'another-owner', await sha256(assessmentInput(otherOwner, profile)), JSON.stringify(assessment)],
+      [outdated, 'test-owner', 'outdated-input', JSON.stringify(assessment)],
+      [malformed, 'test-owner', await sha256(assessmentInput(malformed, profile)), '{invalid-json'],
+    ]) await postgres.query('INSERT INTO permitline_dashboard.jev_assessments VALUES ($1,$2,$3,$4,$5)', [owner, permit.id, hash, payload, Date.now()]);
+    const repeated = await (await request('/api/permits?pageSize=50')).json();
+    assert.deepEqual(repeated.permits.find(permit => permit.id === fresh.id).assessment, assessment);
+    assert.equal(repeated.permits.find(permit => permit.id === fresh.id).priority, 95);
+    for (const permit of [otherOwner, outdated, malformed]) assert.equal(repeated.permits.find(row => row.id === permit.id).assessment, undefined);
+    queries.length = 0;
+    const empty = await (await request('/api/permits?q=unmatched-batch-query')).json();
+    assert.equal(empty.permits.length, 0);
+    assert.equal(queries.filter(query => /from "permitline_dashboard"\."jev_assessments"/i.test(query)).length, 0);
+  } finally { await postgres.exec('ROLLBACK'); delete process.env.AIMLAPI_KEY; }
 });
 test('Jev uses AI/ML API with typed questions and reuses a cached assessment', async context => {
   process.env.AIMLAPI_KEY = 'test-only-aiml-key';

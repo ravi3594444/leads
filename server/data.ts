@@ -1,5 +1,5 @@
 import { env } from "./env";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "../db";
 import { assessments, leadStates, preferences } from "../db/schema";
@@ -64,23 +64,35 @@ export function normalizePermit(record: unknown): Permit {
     firstSeenAt: iso(r.firstSeenAt || r.first_seen_at) || new Date().toISOString(), updatedAt: iso(r.updatedAt || r.updated_at || r.last_changed_at || r.source_updated_at || r.last_seen_at) || new Date().toISOString(), priority: 0, priorityReasons: [], demo: false };
 }
 export function assessmentInput(permit: Permit, profile: Profile): string { return JSON.stringify({ assessmentVersion: "aimlapi/typesafe/jev/v1", description: permit.description, trade: permit.trade, propertyType: permit.propertyType, value: permit.value, status: permit.status, issuedAt: permit.issuedAt, county: permit.county, profile }); }
+export async function withAssessments(permits: Permit[], profile: Profile, userId: string): Promise<Permit[]> {
+  const scored = permits.map(permit => scorePermit(permit, profile));
+  if (!profile.jevEnabled || !permits.length) return scored;
+  // One lookup for the page, scoped to its owner and permit IDs. With one pooled
+  // connection, a lookup per card would queue a separate network round trip.
+  const cachedRows = await getDb().select().from(assessments).where(and(
+    eq(assessments.userId, userId), inArray(assessments.permitId, permits.map(permit => permit.id)),
+  ));
+  const cachedById = new Map(cachedRows.map(cached => [cached.permitId, cached]));
+  return Promise.all(scored.map(async permit => {
+    const cached = cachedById.get(permit.id);
+    if (cached && cached.inputHash === await sha256(assessmentInput(permit, profile))) {
+      try { const assessment = JSON.parse(cached.payload) as Assessment; return { ...permit, priority: assessment.score, assessment }; } catch { /* Recompute on the next explicit Jev request. */ }
+    }
+    return permit;
+  }));
+}
 export async function withAssessment(permit: Permit, profile: Profile, userId: string): Promise<Permit> {
-  let result = scorePermit(permit, profile);
-  if (!profile.jevEnabled) return result;
-  const [cached] = await getDb().select().from(assessments).where(and(eq(assessments.userId, userId), eq(assessments.permitId, permit.id))).limit(1);
-  if (cached && cached.inputHash === await sha256(assessmentInput(permit, profile))) {
-    try { const assessment = JSON.parse(cached.payload) as Assessment; result = { ...result, priority: assessment.score, assessment }; } catch { /* Recompute on the next explicit Jev request. */ }
-  }
-  return result;
+  return (await withAssessments([permit], profile, userId))[0];
 }
 export function filtersFrom(params: URLSearchParams): Filters {
   const value = (key: keyof Filters) => params.get(key) || String(DEFAULT_FILTERS[key]);
   return { ...DEFAULT_FILTERS, q: (params.get("q") || "").slice(0, 200), county: value("county"), trade: value("trade"), status: value("status"), propertyType: value("propertyType"), age: value("age") as Filters["age"], sort: value("sort"), onlyServiceArea: params.get("onlyServiceArea") === "true", leadStatus: value("leadStatus"), minimumValue: Math.max(0, Number(params.get("minimumValue")) || 0), hideDismissed: params.get("hideDismissed") !== "false" };
 }
 export async function permitPage(userId: string, params: URLSearchParams): Promise<PermitPage> {
-  const profile = await profileFor(userId), leads = await leadsFor(userId), filters = filtersFrom(params);
+  const profile = await profileFor(userId), filters = filtersFrom(params);
   const page = Math.max(1, Math.floor(Number(params.get("page")) || 1)), pageSize = Math.min(50, Math.max(1, Math.floor(Number(params.get("pageSize")) || 10))), savedOnly = params.get("view") === "saved";
   if (useCollectorApi()) {
+    const leads = await leadsFor(userId);
     const query = new URLSearchParams(params); query.set("page", String(page)); query.set("limit", String(pageSize)); query.set("pageSize", String(pageSize)); query.set("profile", JSON.stringify(profile));
     const savedIds = Object.entries(leads).filter(([, lead]) => lead.status !== "new" && lead.status !== "dismissed" && (filters.leadStatus === "all" || lead.status === filters.leadStatus)).map(([id]) => id);
     if (savedOnly && !savedIds.length) return { permits: [], total: 0, page, pageSize, stats: null, mode: "live", updatedAt: new Date().toISOString() };
@@ -89,11 +101,11 @@ export async function permitPage(userId: string, params: URLSearchParams): Promi
     const data = await remote("/api/permits", query) as Record<string, unknown>;
     const rows = data.permits || data.items || data.data;
     if (!Array.isArray(rows) || !Number.isFinite(Number(data.total))) throw new ApiError(502, "The permit API must return permits and a total record count.");
-    const permits = await Promise.all(rows.slice(0, pageSize).map(async row => withAssessment(normalizePermit(row), profile, userId)));
+    const permits = await withAssessments(rows.slice(0, pageSize).map(normalizePermit), profile, userId);
     return { permits, total: Number(data.total), page, pageSize, stats: data.stats as PermitPage["stats"] || null, mode: "live", updatedAt: iso(data.updatedAt) || new Date().toISOString() };
   }
   const data = await collectorPage(userId, profile, filters, savedOnly, page, pageSize);
-  const permits = await Promise.all(data.rows.map(row => withAssessment(normalizePermit(row), profile, userId)));
+  const permits = await withAssessments(data.rows.map(normalizePermit), profile, userId);
   return { permits, total: data.total, page, pageSize, stats: data.stats, mode: "live", updatedAt: iso(data.updatedAt) || new Date().toISOString() };
 }
 export async function permitExport(userId: string, params: URLSearchParams): Promise<{ permits: Permit[]; total: number; limit: number }> {

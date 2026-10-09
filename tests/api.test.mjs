@@ -95,6 +95,19 @@ test('Postgres schema is idempotent and blocks client database roles', async () 
     finally { await postgres.exec('RESET ROLE'); }
   }
 });
+test('opening the locked login screen needs no database query, but sessions still require verification', async context => {
+  let queries = 0;
+  context.mock.method(database, 'select', () => { queries++; throw Object.assign(new Error('Test-only unavailable connection'), { code: 'CONNECT_TIMEOUT' }); });
+  context.mock.method(console, 'error', () => {});
+  const response = await request('/api/auth/status', { session: null });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).unlocked, false);
+  assert.equal(queries, 0);
+  const withSession = await request('/api/auth/status');
+  assert.equal(withSession.status, 503);
+  assert.equal((await withSession.json()).errorCode, 'CONNECT_TIMEOUT');
+  assert.equal(queries, 1);
+});
 test('cross-origin writes are rejected and authenticated filtering works', async () => {
   assert.equal((await request('/api/leads', { method: 'POST', requestOrigin: 'https://another.test', body: { updates: [{ id: '00000000-0000-4000-8000-000000000001', status: 'saved' }] } })).status, 403);
   const all = await (await request('/api/permits?pageSize=10')).json();
@@ -409,7 +422,7 @@ test('startup reveals a safe underlying connection code without leaking private 
   context.mock.method(database, 'select', () => { throw new Error(`Failed SQL containing ${secret}`, { cause }); });
   const logs = [];
   context.mock.method(console, 'error', (...args) => logs.push(args));
-  const response = await request('/api/auth/status', { session: null });
+  const response = await request('/api/auth/status');
   assert.equal(response.status, 503);
   const result = await response.json();
   assert.equal(result.errorCode, 'SELF_SIGNED_CERT_IN_CHAIN');

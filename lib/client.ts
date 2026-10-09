@@ -1,13 +1,39 @@
 export class ClientError extends Error { constructor(message: string, public status: number) { super(message); } }
-export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...options, headers: { ...(options?.body ? { "Content-Type": "application/json" } : {}), ...options?.headers }, credentials: "same-origin", cache: "no-store" });
-  const data = await response.json().catch(() => ({ error: "The workspace couldn't read this response. Please try again." }));
-  if (!response.ok) {
+type ApiOptions = RequestInit & { timeoutMs?: number };
+export async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
+  const { timeoutMs = path === "/api/jev/assess" ? 180000 : 20000, signal: callerSignal, ...requestOptions } = options;
+  if (callerSignal?.aborted) throw callerSignal.reason;
+  const controller = new AbortController();
+  let timedOut = false;
+  const cancel = () => controller.abort(callerSignal?.reason);
+  callerSignal?.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  try {
+    const headers = new Headers(requestOptions.headers);
+    if (requestOptions.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    const response = await fetch(path, { ...requestOptions, signal: controller.signal, headers, credentials: "same-origin", cache: "no-store" });
     if (response.status === 401 && !path.startsWith("/api/auth/")) window.dispatchEvent(new Event("permitline:locked"));
-    const message = data && typeof data === "object" && "error" in data && typeof data.error === "string" ? data.error : "This request couldn't be completed.";
-    throw new ClientError(message, response.status);
+    let data: unknown;
+    try { data = await response.json(); }
+    catch (error) {
+      if (controller.signal.aborted) throw error;
+      throw new ClientError("The workspace couldn't read this response. Please try again.", response.ok ? 502 : response.status);
+    }
+    if (!response.ok) {
+      const message = data && typeof data === "object" && "error" in data && typeof data.error === "string" ? data.error : "This request couldn't be completed.";
+      throw new ClientError(message, response.status);
+    }
+    return data as T;
+  } catch (error) {
+    if (callerSignal?.aborted) throw callerSignal.reason;
+    if (timedOut) throw new ClientError(requestOptions.method && requestOptions.method !== "GET"
+      ? "This request is taking too long. Refresh the workspace to check whether it completed before trying again."
+      : "The workspace is taking too long to respond. Please try again.", 408);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", cancel);
   }
-  return data as T;
 }
 export function downloadFile(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob), anchor = document.createElement("a");

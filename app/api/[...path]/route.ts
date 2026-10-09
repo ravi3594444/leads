@@ -20,8 +20,11 @@ async function serve(request: Request): Promise<Response> {
 
     if (path === "auth/status" && request.method === "GET") {
       const user = await platformUser();
-      const account = await getAccount(user.userId);
-      if (!account && (!env.WORKSPACE_PASSWORD || env.WORKSPACE_PASSWORD.length < 10 || env.WORKSPACE_PASSWORD.length > 200)) throw new ApiError(503, "Set WORKSPACE_PASSWORD in Vercel to a private password of 10–200 characters before the first login.");
+      const initial = env.WORKSPACE_PASSWORD;
+      const configured = initial && initial.length >= 10 && initial.length <= 200;
+      // Showing the locked login screen needs no database connection when its
+      // private password seed is configured. Real sessions still hit Postgres.
+      if (!configured && !await getAccount(user.userId)) throw new ApiError(503, "Set WORKSPACE_PASSWORD in Vercel to a private password of 10–200 characters before the first login.");
       return json({ signedIn: true, setupRequired: false, unlocked: await isUnlocked(request, user.userId), displayName: user.fullName });
     }
     if (path === "auth/setup" && request.method === "POST") {

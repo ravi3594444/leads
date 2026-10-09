@@ -76,6 +76,8 @@ CREATE INDEX IF NOT EXISTS permits_activity_date_asc_idx
 
 The dashboard's private saved states and notes remain in `permitline_dashboard`, joined by the collector's stable permit UUID. Permit updates do not overwrite notes. CSV includes matching records and private notes, with a default maximum of 5,000 rows (`limit` can increase it to 20,000). Export headers report the exported and matching counts. Priority sorting and CSV priority use the deterministic service-fit index; explicitly requested cached Jev assessments are shown on permit cards and detail views when enabled.
 
+Date counters describe all connected records; the result list applies the selected filters. Commercial-only defaults are visible as a removable filter above the list. Removing that filter keeps the selected date view and includes residential and unknown property types. Clear filters removes the property-type restriction too; the saved commercial preference is retained for the next visit.
+
 No new VM, n8n instance or collector changes are required for this connection. Configuring the optional HTTPS API instead keeps the following existing contract available.
 
 ## Optional collector API contract
